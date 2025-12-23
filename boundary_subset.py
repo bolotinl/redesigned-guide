@@ -135,11 +135,11 @@ def _get_layers_from_nex(gpkg: Path, nexus: pd.Series) -> Mapping[str, gpd.GeoDa
     Returns:
         Mapping[str, gpd.GeoDataFrame]: Mapping of layer names to layers extracted by nexus ids
     """
-    nex = gpd.read_file(gpkg, layer='nexus', use_arrow=True)
+    nex = gpd.read_file(gpkg, layer='nexus', engine='pyogrio')
     nex = nex.query('id in @nexus')
-    pois = gpd.read_file(gpkg, layer='pois', use_arrow=True)
+    pois = gpd.read_file(gpkg, layer='pois', engine='pyogrio')
     pois = pois.query('nex_id in @nexus')
-    hydro = gpd.read_file(gpkg, layer='hydrolocations', use_arrow=True)
+    hydro = gpd.read_file(gpkg, layer='hydrolocations', engine='pyogrio')
     hydro = hydro.query('nex_id in @nexus')
 
     return {"nexus": nex, "pois": pois, "hydrolocations": hydro}
@@ -154,9 +154,9 @@ def _get_layers_from_flowpath(gpkg: Path, flowpaths: pd.Series)-> Mapping[str, g
     Returns:
         Mapping[str, gpd.GeoDataFrame]: Mapping of layer names to layers extracted by flowpath ids
     """
-    attrs = gpd.read_file(gpkg, layer='flowpath-attributes', use_arrow=True)
+    attrs = gpd.read_file(gpkg, layer='flowpath-attributes', engine='pyogrio')
     attrs = attrs.query('id in @flowpaths')
-    attrs_ml = gpd.read_file(gpkg, layer='flowpath-attributes-ml', use_arrow=True)
+    attrs_ml = gpd.read_file(gpkg, layer='flowpath-attributes-ml', engine='pyogrio')
     attrs_ml = attrs_ml.query('id in @flowpaths')
 
     return {"flowpath-attributes": attrs, "flowpath-attributes-ml": attrs_ml}
@@ -173,7 +173,7 @@ def _get_layers_from_poi(gpkg: Path, pois: pd.Series)->Mapping[str, gpd.GeoDataF
     """
 
     # NJF TODO verify this poi relationship exists for all lakes...
-    lakes = gpd.read_file(gpkg, layer='lakes', use_arrow=True)
+    lakes = gpd.read_file(gpkg, layer='lakes', engine='pyogrio')
     lakes = lakes.query('poi_id in @pois')
 
     return {"lakes": lakes}
@@ -189,10 +189,10 @@ def get_sub_layers(gpkg: Path, mainstem: Iterable[str], ghost:Optional[str]=None
     Returns:
         Mapping[str, gpd.GeoDataFrame]: Mapping of layer names to layer subset tables
     """
-    flowpaths = gpd.read_file(gpkg, layer='flowpaths', use_arrow=True).set_index('id')
-    divides = gpd.read_file(gpkg, layer='divides', use_arrow=True)
-    divide_attrs = gpd.read_file(gpkg, layer='divide-attributes', use_arrow=True)
-    network = gpd.read_file(gpkg, layer='network', use_arrow=True)
+    flowpaths = gpd.read_file(gpkg, layer='flowpaths', engine='pyogrio').set_index('id')
+    divides = gpd.read_file(gpkg, layer='divides', engine='pyogrio')
+    divide_attrs = gpd.read_file(gpkg, layer='divide-attributes', engine='pyogrio')
+    network = gpd.read_file(gpkg, layer='network', engine='pyogrio')
     sub_flowpaths = flowpaths.loc[ mainstem ]
     sub_divides = divides[ divides['divide_id'].isin(sub_flowpaths['divide_id']) ]
 
@@ -246,12 +246,11 @@ if __name__ == "__main__":
     else:
         output_dir = Path("./")
 
-    # use_arrow here makes these reads 2-3x faster, especially for
-    # reading the network table
-    network = gpd.read_file(_to_open, layer='network', use_arrow=True)
-    flowpaths = gpd.read_file(_to_open, layer='flowpaths', use_arrow=True).set_index('id')
+    # pyogrio engine makes these reads faster while managing memory efficiently
+    network = gpd.read_file(_to_open, layer='network', engine='pyogrio')
+    flowpaths = gpd.read_file(_to_open, layer='flowpaths', engine='pyogrio').set_index('id')
     if args.plot_wide:
-        divides = gpd.read_file(_to_open, layer='divides', use_arrow=True)
+        divides = gpd.read_file(_to_open, layer='divides', engine='pyogrio')
     
     boundaries = gpd.read_file(shp)
 
@@ -262,6 +261,9 @@ if __name__ == "__main__":
     boundaries.set_index(args.field, inplace=True)
     if args.ids:
         boundaries = boundaries.loc[args.ids]
+
+    # Define CSV filename for coverage data
+    csv_filename = output_dir / "coverage_summary.csv"
 
     for name, boundary in boundaries.iterrows():
         print(f"Extracting hydrofabric for {name}")
@@ -281,7 +283,12 @@ if __name__ == "__main__":
         total_divide_area = all['divides']['geometry'].area.sum()
         # SHOULD only be a single area, so take the first...
         boundary_area = boundary['geometry'].area.values[0]
-        print(f"Percent of boundary area covered by hydrofabric subset: {(total_divide_area/boundary_area)*100:.2f}%")
+        coverage_percent = (total_divide_area/boundary_area)*100
+        print(f"Percent of boundary area covered by hydrofabric subset: {coverage_percent:.2f}%")
+        
+        # Append coverage data to CSV immediately
+        coverage_row = pd.DataFrame([{args.field: name, 'coverage_percent': coverage_percent}])
+        coverage_row.to_csv(csv_filename, mode='a', header=not csv_filename.exists(), index=False)
 
         # If asked, plot the extracted flowpaths and divides
         if args.plot or args.plot_wide:
@@ -301,3 +308,5 @@ if __name__ == "__main__":
         # Write to a new geopackage
         for table, layer in all.items():
             gpd.GeoDataFrame(layer).to_file(output_dir / f"{name}_{terminal_nexus}.gpkg", layer=table, driver='GPKG')
+
+    print(f"Coverage summary saved to {csv_filename}")
